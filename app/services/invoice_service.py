@@ -9,21 +9,41 @@ class InvoiceService:
     async def process_draft_header(
         self, client_id: int, org_id: int, user_id: int, data: InvoiceHeaderCreate
     ) -> dict:
-        print(f"Creando C_BPartner con RUC {data.document_number}...")
-        bpartner_id = await self.idempiere_client.create_bpartner(
-            ruc=data.document_number,
-            name=data.client_name,
-            ad_client_id=client_id,
-            ad_org_id=org_id,
+
+        print(f"🔍 Consultando a iDempiere: ¿Existe el RUC {data.document_number}?")
+
+        # 1. BUSCAR ANTES DE CREAR
+        bpartner_id = await self.idempiere_client.get_bpartner_by_ruc(
+            ruc=data.document_number
         )
 
-        print(f"Cliente {bpartner_id} creado. Generando Dirección...")
+        if bpartner_id:
+            print(
+                f"✅ ¡Cliente encontrado! C_BPartner_ID: {bpartner_id}. Reutilizando registro."
+            )
+        else:
+            print(
+                f"⚠️ Cliente nuevo. Creando C_BPartner con RUC {data.document_number}..."
+            )
+            bpartner_id = await self.idempiere_client.create_bpartner(
+                ruc=data.document_number,
+                name=data.client_name,
+                ad_client_id=client_id,
+                ad_org_id=org_id,
+            )
+
+        # 2. Gestión de la Dirección (Location)
+        # Nota arquitectónica: Para ser puristas, aquí también deberíamos buscar
+        # si el bpartner_id ya tiene una dirección atada (C_BPartner_Location).
+        # Para no bloquear el MVP, generamos una por defecto si falla.
+        print(f"Generando/Asignando Dirección...")
         location_id = await self.idempiere_client.create_location(ad_org_id=org_id)
         bp_location_id = await self.idempiere_client.create_bpartner_location(
             c_bpartner_id=bpartner_id, c_location_id=location_id, ad_org_id=org_id
         )
 
-        print(f"Dirección {bp_location_id} creada. Generando Factura (Draft)...")
+        # 3. Creación del Borrador de Factura
+        print(f"Generando Factura (Draft) para BPartner {bpartner_id}...")
         invoice_id = await self.idempiere_client.create_invoice_header(
             c_bpartner_id=bpartner_id,
             c_bpartner_location_id=bp_location_id,
@@ -43,10 +63,10 @@ class InvoiceService:
         self, invoice_id: int, client_id: int, org_id: int, data: InvoiceLineCreate
     ) -> dict:
         print(
-            f"Enviando a iDempiere: Producto {data.m_product_id} x {data.qty} a Factura {invoice_id}"
+            f"➕ Insertando Producto {data.m_product_id} x {data.qty} en Factura {invoice_id}"
         )
 
-        # 1. Llamada HTTP real
+        # 1. Insertamos la línea (iDempiere calculará el IVA por debajo)
         idempiere_line_response = await self.idempiere_client.create_invoice_line(
             c_invoice_id=invoice_id,
             m_product_id=data.m_product_id,
@@ -55,22 +75,24 @@ class InvoiceService:
             ad_org_id=org_id,
         )
 
-        # 2. Extraemos los cálculos matemáticos y de impuestos que hizo iDempiere
+        # 2. Consultamos la cabecera actualizada para obtener el Total Real (GrandTotal)
+        updated_invoice = await self.idempiere_client.get_invoice(
+            c_invoice_id=invoice_id
+        )
+
+        # Extraemos los totales con seguridad
         line_id = idempiere_line_response.get("id") or idempiere_line_response.get(
             "C_InvoiceLine_ID"
         )
-        line_net_amt = idempiere_line_response.get("LineNetAmt", 0)
-        tax_amt = idempiere_line_response.get("TaxAmt", 0)
-        line_total_amt = line_net_amt + tax_amt
+        grand_total = updated_invoice.get("GrandTotal", 0.0)
+        total_lines = updated_invoice.get("TotalLines", 0.0)  # Subtotal sin impuestos
 
         return {
             "invoice_line_id": line_id,
-            "product_name": f"Producto ID {data.m_product_id}",
+            "product_id": data.m_product_id,
             "qty": data.qty,
-            "line_net_amt": line_net_amt,
-            "tax_amt": tax_amt,
-            "line_total_amt": line_total_amt,
-            "invoice_grand_total": line_total_amt,
+            "subtotal": total_lines,
+            "invoice_grand_total": grand_total,  # Este es el que le importa al cliente
         }
 
     async def complete_invoice(self, invoice_id: int) -> dict:
@@ -85,3 +107,10 @@ class InvoiceService:
             "document_no": document_no,
             "status": doc_status,
         }
+
+    async def search_products(self, client_id: int, query: str = None) -> list:
+        """Obtiene y formatea los productos para el SDUI"""
+        print(f"📦 Consultando catálogo para tenant {client_id} | Búsqueda: '{query}'")
+        return await self.idempiere_client.get_products(
+            ad_client_id=client_id, search_query=query
+        )

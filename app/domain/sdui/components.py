@@ -43,6 +43,21 @@ class BannerComponent(BaseModel):
     color_hex: str = "#FFD700"
 
 
+class ProgressComponent(BaseModel):
+    type: Literal["progress"]
+    id: str = Field(..., description="ID único del componente de progreso")
+    label: str = Field(
+        ..., description="Texto a mostrar encima de la barra (ej: Documentos usados)"
+    )
+    current_value: float = Field(..., description="Valor actual consumido")
+    max_value: float = Field(..., description="Valor máximo permitido (límite)")
+    percentage: float = Field(..., description="Porcentaje calculado (0 a 100)")
+    color_hex: str = Field(
+        default="#4CAF50",
+        description="Color de la barra (ej: verde normal, rojo si es peligroso)",
+    )
+
+
 # ---------------------------------------------------------
 # 3. Componentes de Formulario (Nuevos)
 # ---------------------------------------------------------
@@ -98,6 +113,7 @@ AnyComponent = Union[
     TextInputComponent,
     SelectComponent,
     ListItemComponent,
+    ProgressComponent,  # <-- No olvidar añadirlo aquí también
 ]
 
 

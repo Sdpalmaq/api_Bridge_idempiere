@@ -8,6 +8,7 @@ from app.domain.sdui.components import (
     WidgetComponent,
     BannerComponent,
     UIAction,
+    ProgressComponent,
 )
 from app.api.v1.endpoints import auth, invoices
 
@@ -38,15 +39,31 @@ async def get_dashboard_ui(
     current_user: UserContext = Depends(get_current_user_context),
 ):
     """
-    Devuelve la estructura de la pantalla Dashboard estandarizada con Pydantic.
+    Devuelve la estructura del Dashboard principal con el consumo real de la cuota.
     """
+    # 1. Lógica de Negocio (MOCK: esto luego viene de BD)
+    limite_docs = 50 if current_user.subscription_tier == "Básico" else 5000
+    docs_usados = 45  # A punto de acabarse la cuota
+    porcentaje = (docs_usados / limite_docs) * 100
 
-    # 1. Definimos los componentes base de forma segura
+    # 2. Definimos los componentes
     components_list = [
         HeaderComponent(
             type="header",
             title=f"Bienvenido a tu Empresa",
-            subtitle=f"Sucursal ID: {current_user.ad_org_id}",
+            subtitle=f"Plan {current_user.subscription_tier} activo",
+        ),
+        # NUEVO: Componente visual de cuotas
+        ProgressComponent(
+            type="progress",
+            id="quota_progress",
+            label="Documentos emitidos este mes",
+            current_value=docs_usados,
+            max_value=limite_docs,
+            percentage=porcentaje,
+            color_hex=(
+                "#F44336" if porcentaje > 80 else "#4CAF50"
+            ),  # Rojo si está en peligro
         ),
         ButtonComponent(
             type="button",
@@ -54,31 +71,20 @@ async def get_dashboard_ui(
             style="primary",
             action=UIAction(
                 type="navigate",
-                target="/invoices/create",
-                params={"client_id": current_user.ad_client_id},
+                target="/api/v1/invoices/sdui/create",  # <-- Flutter llamará a este GET
             ),
         ),
     ]
 
-    # 2. Lógica de Suscripciones (Tiers)
-    if current_user.subscription_tier in ["Pro", "Empresarial"]:
-        components_list.append(
-            WidgetComponent(
-                type="widget",
-                id="bi_sales_chart",
-                label="Gráfico de Ventas Mensuales",
-                data_endpoint="/api/v1/reports/sales-chart",
-            )
-        )
-    else:
+    # Banner de Upgrade si está en plan Básico
+    if current_user.subscription_tier == "Básico":
         components_list.append(
             BannerComponent(
                 type="banner",
-                label="Mejora a plan Pro para ver métricas avanzadas",
+                label="Mejora a plan Pro para ver métricas avanzadas y facturar sin límites",
                 color_hex="#E8EAF6",
                 action=UIAction(type="modal", target="upgrade_plan"),
             )
         )
 
-    # 3. Retornamos el modelo validado
     return ScreenLayout(screen_name="Dashboard Principal", layout=components_list)

@@ -128,41 +128,25 @@ async def create_invoice_draft(
 @router.get(
     "/{invoice_id}/lines/sdui",
     response_model=ScreenLayout,
-    summary="UI Catálogo de Productos",
+    summary="UI Catálogo de Productos Real",
     tags=["Facturación Móvil"],
 )
 async def get_invoice_lines_ui(
     invoice_id: int,
-    bpartner_name: str = "Cliente",  # Lo recibimos opcionalmente desde Flutter para la UI
+    bpartner_name: str = "Cliente",
+    search_query: str = None,  # 👈 Flutter enviará esto cuando el usuario escriba
     current_user: UserContext = Depends(get_current_user_context),
 ):
     """
-    Devuelve la pantalla de búsqueda y selección de productos para una factura específica.
+    Devuelve la pantalla de búsqueda y selección de productos reales desde iDempiere.
     """
 
-    # ⚠️ MOCK: En el futuro esto hará un SELECT a la tabla M_Product filtrando por ad_client_id
-    productos_mock = [
-        {
-            "m_product_id": 2001,
-            "name": "Licencia SRI Básica",
-            "value": "SRI-01",
-            "price": "$19.00",
-        },
-        {
-            "m_product_id": 2002,
-            "name": "Módulo POS Restaurante",
-            "value": "POS-02",
-            "price": "$45.00",
-        },
-        {
-            "m_product_id": 2003,
-            "name": "Consultoría Técnica",
-            "value": "SRV-99",
-            "price": "$150.00",
-        },
-    ]
+    # 1. Llamada real a iDempiere a través del servicio
+    productos_reales = await invoice_service.search_products(
+        client_id=current_user.ad_client_id, query=search_query
+    )
 
-    # Armamos la UI Base (Cabecera y Buscador)
+    # 2. Armamos la UI Base (Cabecera y Buscador)
     components = [
         HeaderComponent(
             type="header",
@@ -176,26 +160,50 @@ async def get_invoice_lines_ui(
             placeholder="Nombre o código del producto",
             keyboard_type="text",
             is_required=False,
+            # NOTA: En Flutter, configurar este text_input para que al cambiar
+            # recargue esta misma URL pasando ?search_query=lo_que_escribio
         ),
     ]
 
-    # Construimos la lista de productos dinámicamente
-    for p in productos_mock:
+    # 3. Construimos la lista de productos dinámicamente
+    if not productos_reales:
+        from app.domain.sdui.components import (
+            BannerComponent,
+        )  # Asegúrate de importarlo arriba
+
         components.append(
-            ListItemComponent(
-                type="list_item",
-                id=f"prod_{p['m_product_id']}",
-                title=p["name"],
-                subtitle=f"Cód: {p['value']}",
-                value=p["price"],
-                # Al tocar el producto, Flutter mandará un POST para agregarlo a la factura
-                action=UIAction(
-                    type="api_call",
-                    target=f"/api/v1/invoices/{invoice_id}/add-line",
-                    params={"m_product_id": p["m_product_id"], "qty": 1},
-                ),
+            BannerComponent(
+                type="banner",
+                label="No se encontraron productos activos.",
+                color_hex="#FFCDD2",  # Rojo clarito
+                action=UIAction(type="modal", target="none"),
             )
         )
+    else:
+        for p in productos_reales:
+            # Extraemos los datos reales. iDempiere puede devolver el ID en minúscula o con el nombre del modelo.
+            prod_id = p.get("id") or p.get("M_Product_ID")
+            nombre = p.get("Name", "Sin Nombre")
+            codigo = p.get("Value", "S/N")
+
+            # Nota: El precio idealmente viene de una tarifa (M_PriceList_Version),
+            # pero para este MVP tomaremos un campo referencial o lo dejamos en "Agregar"
+            precio = p.get("PriceStd", 0.0)
+
+            components.append(
+                ListItemComponent(
+                    type="list_item",
+                    id=f"prod_{prod_id}",
+                    title=nombre,
+                    subtitle=f"Cód: {codigo}",
+                    value=f"${precio:.2f}",
+                    action=UIAction(
+                        type="api_call",
+                        target=f"/api/v1/invoices/{invoice_id}/add-line",
+                        params={"m_product_id": prod_id, "qty": 1},
+                    ),
+                )
+            )
 
     return ScreenLayout(screen_name="Catálogo de Productos", layout=components)
 
@@ -210,18 +218,19 @@ async def add_invoice_line(
     payload: InvoiceLineCreate,
     current_user: UserContext = Depends(get_current_user_context),
 ):
-    # 1. Procesamos la línea en el servicio (¡AHORA SÍ REAL!)
+    # 1. Procesamos la línea en el servicio
     result = await invoice_service.add_line_to_invoice(
         invoice_id=invoice_id,
         client_id=current_user.ad_client_id,
-        org_id=current_user.ad_org_id,  # 👈 ESTO ES VITAL PARA QUE NO FALLE
+        org_id=current_user.ad_org_id,
         data=payload,
     )
 
     # 2. SDUI...
     return {
         "status": "success",
-        "message": f"Se agregó {result['qty']}x {result['product_name']}.",
+        # 👇 AQUÍ ARREGLAMOS EL ERROR: Quitamos product_name
+        "message": f"Se agregaron {result['qty']} unidades a la factura.",
         "data": result,
         "next_action": {
             "type": "modal",
@@ -238,30 +247,62 @@ async def add_invoice_line(
 
 @router.post(
     "/{invoice_id}/complete",
-    summary="Emitir Factura al SRI",
+    summary="Emitir Factura al SRI (Con validación de Cuotas)",
     tags=["Facturación Móvil"],
 )
 async def complete_invoice_action(
     invoice_id: int, current_user: UserContext = Depends(get_current_user_context)
 ):
     """
-    Paso final. Cambia el estado de la factura a 'Completado'.
-    Devuelve la orden al móvil para regresar al Dashboard.
+    Paso final. Valida el Tier del usuario.
+    Si tiene cuota -> Cambia estado a 'Completado' en iDempiere.
+    Si NO tiene cuota -> Devuelve un Modal SDUI para hacer Upgrade.
     """
-    # 1. Procesar en el ERP
+
+    # 1. 🛡️ GUARDIÁN DE CUOTAS (Lógica de Negocio)
+    # Definimos los límites según el Tier (Esto luego vendrá de la BD)
+    limite_docs = 50 if current_user.subscription_tier == "Básico" else 5000
+
+    # MOCK: Simulamos que consultamos la BD y el usuario "Básico" ya hizo 50 facturas.
+    # (Cambia este número a 10 para probar el "camino feliz" de nuevo)
+    docs_consumidos_este_mes = 50
+
+    if docs_consumidos_este_mes >= limite_docs:
+        print(
+            f"🚫 BLOQUEO: El usuario {current_user.user_id} agotó su plan {current_user.subscription_tier}."
+        )
+
+        # MAGIA SDUI: No lanzamos un error 500. Devolvemos una UI para venderle más.
+        return {
+            "status": "quota_exceeded",
+            "message": "Has alcanzado el límite de tu plan.",
+            "next_action": {
+                "type": "modal",
+                "target": "show_upgrade_plan",
+                "params": {
+                    "title": "¡Límite Alcanzado! 🚀",
+                    "message": f"Tu plan {current_user.subscription_tier} te permite emitir {limite_docs} facturas/mes. Pásate al plan Pro para facturar sin límites.",
+                    "button_label": "Ver Planes y Mejorar",
+                    "upgrade_url": "/api/v1/tiers/sdui",  # Aquí lo mandaríamos a la pasarela de pago
+                    "cancel_action": "dismiss",
+                },
+            },
+        }
+
+    # 2. Si tiene cuota libre, procedemos con el ERP
+    print(
+        f"✅ Cuota validada ({docs_consumidos_este_mes}/{limite_docs}). Procesando en iDempiere..."
+    )
     result = await invoice_service.complete_invoice(invoice_id=invoice_id)
 
-    # 2. SDUI: ¿Qué hace Flutter después de cobrar?
-    # Le decimos que lance un mensaje de éxito y lo mandamos de vuelta al Home.
+    # 3. Respuesta Exitosa SDUI
     return {
         "status": "success",
         "message": f"¡Factura {result['document_no']} emitida con éxito!",
         "data": result,
         "next_action": {
             "type": "navigate",
-            "target": "/dashboard",  # De vuelta a la pantalla principal
-            "params": {
-                "refresh_charts": True  # Le decimos a la app que recargue los gráficos
-            },
+            "target": "/dashboard",
+            "params": {"refresh_charts": True, "show_toast": "Factura enviada al SRI"},
         },
     }

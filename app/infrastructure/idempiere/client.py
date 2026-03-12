@@ -68,6 +68,52 @@ class IDempiereClient:
                     detail="Error de conexión.",
                 )
 
+    async def _get(self, endpoint: str, params: dict = None) -> dict | None:
+        """Método privado para hacer peticiones GET a iDempiere (Búsquedas con filtros)"""
+        url = f"{self.base_url}{endpoint}"
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    url, params=params, headers=self.headers, timeout=self.timeout
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                # Si iDempiere devuelve 404 en una búsqueda, significa "No hay resultados", no un fallo del servidor.
+                if e.response.status_code == 404:
+                    return None
+                print(f"Error de iDempiere GET: {e.response.text}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Error ERP al consultar: {e.response.text}",
+                )
+            except httpx.RequestError:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Error de conexión con iDempiere.",
+                )
+
+    # -----------------------------------------------------------------
+    # Agrega este método en la sección de MÉTODOS DE NEGOCIO
+    # -----------------------------------------------------------------
+    async def get_bpartner_by_ruc(self, ruc: str) -> int | None:
+        """
+        Consulta a iDempiere si existe un cliente con ese RUC/Cédula.
+        Utiliza la sintaxis de filtro estándar del REST API de iDempiere.
+        """
+        # Filtro OData estándar en iDempiere para buscar por campo exacto
+        params = {"$filter": f"TaxID eq '{ruc}'"}
+
+        response = await self._get("/models/c_bpartner", params=params)
+
+        # Verificamos si la respuesta trajo registros
+        if response and "records" in response and len(response["records"]) > 0:
+            # Retornamos el ID del primer registro que coincida
+            record = response["records"][0]
+            return record.get("id") or record.get("C_BPartner_ID")
+
+        return None
+
     # MÉTODOS DE AUTENTICACIÓN
     # -----------------------------------------------------------------
     async def login(self, username: str, password: str) -> dict:
@@ -173,9 +219,41 @@ class IDempiereClient:
         Ejecuta la acción de Completar (CO) en la factura.
         Al hacer esto, iDempiere dispara la Facturación Electrónica al SRI.
         """
-        payload = {
-            "doc-action": "CO"
-        }
+        payload = {"doc-action": "CO"}
         # En la API de iDempiere, actualizamos apuntando al ID en la URL
         response = await self._put(f"/models/c_invoice/{c_invoice_id}", payload)
         return response
+
+    async def get_products(self, ad_client_id: int, search_query: str = None) -> list:
+        """
+        Consulta la tabla M_Product filtrando por la empresa actual.
+        Incluye soporte para búsqueda por texto libre.
+        """
+        # Filtro base: Solo productos del tenant y que estén activos
+        filter_str = f"AD_Client_ID eq {ad_client_id} and IsActive eq true"
+
+        # Si el usuario escribió algo en el buscador de Flutter:
+        if search_query:
+            # Buscamos coincidencias en el Nombre o en el Código (Value)
+            query_lower = search_query.lower()
+            filter_str += f" and (contains(tolower(Name), '{query_lower}') or contains(tolower(Value), '{query_lower}'))"
+
+        params = {
+            "$filter": filter_str,
+            "$top": 50,  # Paginación defensiva: máximo 50 productos para no trabar el móvil
+            "$orderby": "Name",
+        }
+
+        response = await self._get("/models/m_product", params=params)
+
+        if response and "records" in response:
+            return response["records"]
+        return []
+
+    async def get_invoice(self, c_invoice_id: int) -> dict:
+        """
+        Obtiene la cabecera de la factura actualizada.
+        Útil para leer los totales e impuestos después de insertar líneas.
+        """
+        response = await self._get(f"/models/c_invoice/{c_invoice_id}")
+        return response if response else {}
