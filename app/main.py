@@ -15,6 +15,9 @@ from app.api.v1.endpoints import auth, invoices
 
 # IMPORTAMOS EL ROUTER DE AUTH
 from app.api.v1.endpoints import auth
+from app.api.v1.endpoints import auth, invoices, sri  # 👈 agrega sri
+from app.services.quota_service import QuotaService  # 👈 nuevo import
+
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -35,10 +38,15 @@ app.include_router(auth.router, prefix="/api/v1/auth", tags=["Autenticación"])
 
 app.include_router(invoices.router, prefix="/api/v1/invoices", tags=["Facturación"])
 
+app.include_router(sri.router, prefix="/api/v1/sri", tags=["SRI Ecuador"])
+
 
 @app.get("/", tags=["Sistema"])
 async def health_check():
     return {"status": "online", "project": settings.PROJECT_NAME}
+
+
+quota_service = QuotaService()
 
 
 @app.get(
@@ -47,32 +55,25 @@ async def health_check():
 async def get_dashboard_ui(
     current_user: UserContext = Depends(get_current_user_context),
 ):
-    """
-    Devuelve la estructura del Dashboard principal con el consumo real de la cuota.
-    """
-    # 1. Lógica de Negocio (MOCK: esto luego viene de BD)
-    limite_docs = 50 if current_user.subscription_tier == "Básico" else 5000
-    docs_usados = 45  # A punto de acabarse la cuota
-    porcentaje = (docs_usados / limite_docs) * 100
+    # Quota REAL desde QuotaService
+    consumido = quota_service.get_consumo(current_user.ad_client_id)
+    limite = quota_service.get_limite(current_user.subscription_tier)
+    porcentaje = (consumido / limite) * 100
 
-    # 2. Definimos los componentes
     components_list = [
         HeaderComponent(
             type="header",
-            title=f"Bienvenido a tu Empresa",
+            title="Bienvenido a tu Empresa",
             subtitle=f"Plan {current_user.subscription_tier} activo",
         ),
-        # NUEVO: Componente visual de cuotas
         ProgressComponent(
             type="progress",
             id="quota_progress",
             label="Documentos emitidos este mes",
-            current_value=docs_usados,
-            max_value=limite_docs,
+            current_value=consumido,
+            max_value=limite,
             percentage=porcentaje,
-            color_hex=(
-                "#F44336" if porcentaje > 80 else "#4CAF50"
-            ),  # Rojo si está en peligro
+            color_hex="#F44336" if porcentaje > 80 else "#4CAF50",
         ),
         ButtonComponent(
             type="button",
@@ -80,7 +81,7 @@ async def get_dashboard_ui(
             style="primary",
             action=UIAction(
                 type="navigate",
-                target="/api/v1/invoices/sdui/create",  # <-- Flutter llamará a este GET
+                target="/api/v1/invoices/sdui/create",
             ),
         ),
         ButtonComponent(
@@ -94,12 +95,11 @@ async def get_dashboard_ui(
         ),
     ]
 
-    # Banner de Upgrade si está en plan Básico
     if current_user.subscription_tier == "Básico":
         components_list.append(
             BannerComponent(
                 type="banner",
-                label="Mejora a plan Pro para ver métricas avanzadas y facturar sin límites",
+                label="Mejora a plan Pro para facturar sin límites",
                 color_hex="#E8EAF6",
                 action=UIAction(type="modal", target="upgrade_plan"),
             )

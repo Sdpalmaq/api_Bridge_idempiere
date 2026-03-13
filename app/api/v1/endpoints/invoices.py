@@ -13,10 +13,11 @@ from app.domain.sdui.components import (
 )
 from app.domain.schemas.invoice import InvoiceHeaderCreate, InvoiceLineCreate
 from app.services.invoice_service import InvoiceService
-
+from app.services.quota_service import QuotaService
 
 router = APIRouter()
 invoice_service = InvoiceService()
+quota_service = QuotaService()  # junto a invoice_service = InvoiceService()
 
 
 def extract(val, default=""):
@@ -300,12 +301,15 @@ async def complete_invoice_action(
     invoice_id: int,
     current_user: UserContext = Depends(get_current_user_context),
 ):
-    limite_docs = 50 if current_user.subscription_tier == "Básico" else 5000
-    docs_consumidos_este_mes = 10  # Cambiar a 50 para probar bloqueo de cuota
+    # 1. Verificar quota REAL
+    puede, consumido, limite = quota_service.puede_emitir(
+        client_id=current_user.ad_client_id,
+        subscription_tier=current_user.subscription_tier,
+    )
 
-    if docs_consumidos_este_mes >= limite_docs:
+    if not puede:
         print(
-            f"🚫 BLOQUEO: usuario {current_user.user_id} agotó plan {current_user.subscription_tier}."
+            f"🚫 BLOQUEO: tenant {current_user.ad_client_id} agotó quota ({consumido}/{limite})"
         )
         return {
             "status": "quota_exceeded",
@@ -315,7 +319,7 @@ async def complete_invoice_action(
                 "target": "show_upgrade_plan",
                 "params": {
                     "title": "¡Límite Alcanzado! 🚀",
-                    "message": f"Tu plan {current_user.subscription_tier} permite {limite_docs} facturas/mes. Pásate al plan Pro.",
+                    "message": f"Tu plan {current_user.subscription_tier} permite {limite} facturas/mes. Llevas {consumido}.",
                     "button_label": "Ver Planes y Mejorar",
                     "upgrade_url": "/api/v1/tiers/sdui",
                     "cancel_action": "dismiss",
@@ -323,23 +327,25 @@ async def complete_invoice_action(
             },
         }
 
-    print(
-        f"✅ Cuota OK ({docs_consumidos_este_mes}/{limite_docs}). Procesando en iDempiere..."
-    )
+    # 2. Emitir en iDempiere
+    print(f"✅ Quota OK ({consumido}/{limite}). Procesando en iDempiere...")
     result = await invoice_service.complete_invoice(invoice_id=invoice_id)
+
+    # 3. Registrar la emisión SOLO si iDempiere tuvo éxito
+    quota_service.registrar_emision(client_id=current_user.ad_client_id)
 
     return {
         "status": "success",
         "message": f"¡Factura {result['document_no']} emitida con éxito!",
         "data": result,
         "next_action": {
-            "type": "modal",  # 👈 cambia navigate por modal
+            "type": "modal",
             "target": "invoice_done",
             "params": {
                 "title": "¡Factura Emitida! ✅",
-                "message": f"Factura {result['document_no']} enviada al SRI correctamente.",
+                "message": f"Factura {result['document_no']} enviada al SRI. Quedan {limite - consumido - 1} docs este mes.",
                 "button_label": "Volver al Inicio",
-                "navigate_after": "/dashboard",  # Flutter navegará aquí al cerrar
+                "navigate_after": "/dashboard",
             },
         },
     }
