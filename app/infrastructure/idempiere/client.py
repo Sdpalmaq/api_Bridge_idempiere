@@ -1,5 +1,7 @@
+from urllib import response
+
 import httpx
-from fastapi import HTTPException, status
+from fastapi import HTTPException, params, status
 from app.core.config import settings
 
 
@@ -257,3 +259,31 @@ class IDempiereClient:
         """
         response = await self._get(f"/models/c_invoice/{c_invoice_id}")
         return response if response else {}
+
+    async def get_invoices(self, ad_client_id: int, ad_org_id: int) -> list:
+        """
+        Obtiene las facturas del tenant ordenadas por fecha descendente.
+        """
+        params = {
+            "$filter": f"AD_Client_ID eq {ad_client_id} and AD_Org_ID eq {ad_org_id}",
+            "$orderby": "Created desc",
+            "$top": 50,
+        }
+
+        response = await self._get("/models/c_invoice", params=params)
+        if response and "records" in response:
+            return response["records"]
+        return []
+    # app/infrastructure/idempiere/client.py
+
+    async def get_invoice_lines(self, c_invoice_id: int) -> list:
+        """Obtiene las líneas de detalle de una factura específica."""
+        params = {
+            "$filter": f"C_Invoice_ID eq {c_invoice_id}",
+            "$orderby": "Line",
+        }
+        response = await self._get("/models/c_invoiceline", params=params)
+        if response and "records" in response:
+            return response["records"]
+        return []
+    

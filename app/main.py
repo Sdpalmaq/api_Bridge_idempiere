@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware  # 👈 nuevo import
 from app.core.config import settings
 from app.core.security import get_current_user_context, UserContext
 from app.domain.sdui.components import (
@@ -19,6 +20,14 @@ app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     description="BFF Middleware para iDempiere y Flutter - Facturación Electrónica SRI Ecuador",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 👈 asterisco simple, permite todo en desarrollo
+    allow_credentials=False,  # 👈 debe ser False cuando allow_origins=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Registramos las rutas de autenticación
@@ -72,6 +81,15 @@ async def get_dashboard_ui(
             action=UIAction(
                 type="navigate",
                 target="/api/v1/invoices/sdui/create",  # <-- Flutter llamará a este GET
+            ),
+        ),
+        ButtonComponent(
+            type="button",
+            label="Ver Mis Facturas",
+            style="secondary",
+            action=UIAction(
+                type="navigate",
+                target="/api/v1/invoices/sdui/list",
             ),
         ),
     ]

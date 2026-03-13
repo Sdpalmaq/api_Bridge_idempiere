@@ -114,3 +114,25 @@ class InvoiceService:
         return await self.idempiere_client.get_products(
             ad_client_id=client_id, search_query=query
         )
+
+    async def get_invoice_list(self, client_id: int, org_id: int) -> list:
+        """Obtiene y formatea las facturas para el SDUI."""
+        print(f"📋 Consultando facturas del tenant {client_id}...")
+        return await self.idempiere_client.get_invoices(
+            ad_client_id=client_id,
+            ad_org_id=org_id,
+        )
+
+    async def get_invoice_detail(self, invoice_id: int) -> dict:
+        """Obtiene cabecera + líneas de una factura."""
+        print(f"🔍 Consultando detalle de factura {invoice_id}...")
+        cabecera = await self.idempiere_client.get_invoice(c_invoice_id=invoice_id)
+        lineas = await self.idempiere_client.get_invoice_lines(c_invoice_id=invoice_id)
+
+        # 👇 Agrega esto temporalmente
+        print(f"📋 Cabecera: {cabecera}")
+        print(f"📋 Líneas encontradas: {len(lineas)}")
+        for l in lineas:
+            print(f"   → Línea: {l}")
+
+        return {"header": cabecera, "lines": lineas}
